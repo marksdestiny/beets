@@ -209,12 +209,17 @@ class AcoustidPlugin(plugins.BeetsPlugin):
         if item.path not in _matches:
             return []
 
-        recording_ids, _ = _matches[item.path]
+        recording_ids, release_ids = _matches[item.path]
         tracks = []
         for recording_id in prefix(recording_ids, MAX_RECORDINGS):
             track = hooks.track_for_mbid(recording_id)
             if track:
                 tracks.append(track)
+                # We might get a different recording in case the requested
+                # recording was merged into another recording.
+                if not track.track_id in recording_ids:
+                    recording_ids.append(track.track_id)
+        _matches[item.path] = recording_ids, release_ids
         self._log.debug("acoustid item candidates: {0}", len(tracks))
         return tracks
 
