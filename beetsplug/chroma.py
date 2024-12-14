@@ -199,9 +199,26 @@ class AcoustidPlugin(plugins.BeetsPlugin):
         if self.config["auto"]:
             self.register_listener("import_task_start", self.fingerprint_task)
         self.register_listener("import_task_apply", apply_acoustid_metadata)
+        self.register_listener(
+            "import_task_before_choice", self.display_acoustid_id
+        )
 
     def fingerprint_task(self, task, session):
         return fingerprint_task(self._log, task, session)
+
+    def display_acoustid_id(
+        self, task: importer.ImportTask, session: importer.ImportSession
+    ):
+        if type(task) is importer.SingletonImportTask:
+            if task.item.acoustid_id:
+                ui.print_(task.item.acoustid_id)
+            else:
+                ui.print_(
+                    ui.colorize(
+                        "text_warning",
+                        "Fingerprint is not associated with an acoustid id.",
+                    )
+                )
 
     def track_distance(self, item, info):
         dist = hooks.Distance()
