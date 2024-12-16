@@ -229,7 +229,6 @@ class AcoustidPlugin(plugins.BeetsPlugin):
         if not match.acoustid:
             return dist
 
-        match = _matches[item.path]
         recording = next(
             iter([r for r in match.recordings if r.id == info.track_id]), None
         )
