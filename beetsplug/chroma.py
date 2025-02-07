@@ -228,13 +228,14 @@ class AcoustidPlugin(plugins.BeetsPlugin):
 
         match = _matches[item.path]
         if not match.acoustid:
-            return dist
-
-        recording = next(
-            iter([r for r in match.recordings if r.id == info.track_id]), None
-        )
-        if not recording:
             dist.add_expr("track_id", True)
+        else:
+            recording = next(
+                iter([r for r in match.recordings if r.id == info.track_id]),
+                None,
+            )
+            if not recording:
+                dist.add_expr("track_id", True)
         return dist
 
     def candidates(self, items, artist, album, va_likely, extra_tags=None):
