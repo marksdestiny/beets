@@ -24,7 +24,7 @@ import dataclasses
 import acoustid
 import confuse
 
-from beets import config, plugins, ui, util, importer
+from beets import config, plugins, ui, util, importer, library
 from beets.autotag import hooks
 
 API_KEY = "1vOwZtEn"
@@ -186,22 +186,48 @@ def _all_releases(items):
 
 
 class AcoustidPlugin(plugins.BeetsPlugin):
+    apikey: str = None
+
     def __init__(self):
         super().__init__()
 
-        self.config.add(
-            {
-                "auto": True,
-            }
-        )
-        config["acoustid"]["apikey"].redact = True
-
+        self.config.add({"auto": True})
         if self.config["auto"]:
             self.register_listener("import_task_start", self.fingerprint_task)
             self.register_listener(
                 "import_task_before_choice", self.display_acoustid_id
             )
             self.register_listener("import_task_apply", apply_acoustid_metadata)
+
+        config["acoustid"].add({"autosubmit": False})
+        config["acoustid"]["apikey"].redact = True
+        if config["acoustid"]["autosubmit"]:
+            try:
+                self.apikey = config["acoustid"]["apikey"].as_str()
+            except confuse.NotFoundError:
+                raise ui.UserError("no Acoustid user API key provided")
+            self.import_stages = [self.submit_if_needed]
+
+    def submit_if_needed(
+        self, session: importer.ImportSession, task: importer.ImportTask
+    ):
+        items: list[library.Item] = task.imported_items()
+        items_to_submit: list[library.Item] = []
+        for item in items:
+            if item.mb_trackid == None:
+                # Probably imported "as-is"
+                continue
+
+            match = _matches[item.path]
+            recording = next(
+                iter([r for r in match.recordings if r.id == item.mb_trackid]),
+                None,
+            )
+            if recording == None:
+                items_to_submit.append(item)
+
+        if len(items_to_submit) > 0:
+            submit_items(self._log, self.apikey, items_to_submit)
 
     def fingerprint_task(self, task, session):
         return fingerprint_task(self._log, task, session)
@@ -298,7 +324,9 @@ class AcoustidPlugin(plugins.BeetsPlugin):
 # Hooks into import process.
 
 
-def fingerprint_task(log, task, session):
+def fingerprint_task(
+    log, task: importer.ImportTask, session: importer.ImportSession
+):
     """Fingerprint each item in the task for later use during the
     autotagging candidate search.
     """
@@ -307,7 +335,9 @@ def fingerprint_task(log, task, session):
         acoustid_match(log, item.path)
 
 
-def apply_acoustid_metadata(task, session):
+def apply_acoustid_metadata(
+    task: importer.ImportTask, session: importer.ImportSession
+):
     """Apply Acoustid metadata (fingerprint and ID) to the task's items."""
     for item in task.imported_items():
         if not item.path in _matches:
