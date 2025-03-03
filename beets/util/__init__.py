@@ -1143,3 +1143,19 @@ def get_temp_filename(
 def unique_list(elements: Iterable[T]) -> list[T]:
     """Return a list with unique elements in the original order."""
     return list(dict.fromkeys(elements))
+
+
+def _deduplicate(l: Iterable[T]):
+    """Remove duplicates from a sorted list."""
+    last = object()
+    for item in l:
+        if item == last:
+            continue
+        yield item
+        last = item
+
+
+def unique_list_of_non_hashable(l: Iterable[T]) -> list:
+    """Return a list with unique elements. This function is slower but also
+    support non-hashable elements."""
+    return list(_deduplicate(sorted(l)))
