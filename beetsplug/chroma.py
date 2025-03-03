@@ -20,10 +20,11 @@ import re
 from collections import defaultdict
 from functools import partial
 
+import dataclasses
 import acoustid
 import confuse
 
-from beets import config, plugins, ui, util
+from beets import config, plugins, ui, util, importer, library
 from beets.autotag import hooks
 
 API_KEY = "1vOwZtEn"
@@ -33,21 +34,36 @@ COMMON_REL_THRESH = 0.6  # How many tracks must have an album in common?
 MAX_RECORDINGS = 5
 MAX_RELEASES = 5
 
+
+@dataclasses.dataclass
+class Recording:
+    id: str
+    sources: int
+
+
+@dataclasses.dataclass
+class Match:
+    def __init__(self):
+        self.acoustid = None
+        self.fingerprint = None
+        self.recordings = []
+        self.release_ids = []
+
+    acoustid: str
+    fingerprint: str
+    recordings: list[Recording]
+    release_ids: list[str]
+
+
 # Stores the Acoustid match information for each track. This is
 # populated when an import task begins and then used when searching for
 # candidates. It maps audio file paths to (recording_ids, release_ids)
 # pairs. If a given path is not present in the mapping, then no match
 # was found.
-_matches = {}
-
-# Stores the fingerprint and Acoustid ID for each track. This is stored
-# as metadata for each track for later use but is not relevant for
-# autotagging.
-_fingerprints = {}
-_acoustids = {}
+_matches: dict[str, Match] = {}
 
 
-def prefix(it, count):
+def prefix[T](it: list[T], count):
     """Truncate an iterable to at most `count` items."""
     for i, v in enumerate(it):
         if i >= count:
@@ -82,6 +98,7 @@ def acoustid_match(log, path):
     """Gets metadata for a file from Acoustid and populates the
     _matches, _fingerprints, and _acoustids dictionaries accordingly.
     """
+    _matches[path] = Match()
     try:
         duration, fp = acoustid.fingerprint_file(util.syspath(path))
     except acoustid.FingerprintGenerationError as exc:
@@ -92,9 +109,11 @@ def acoustid_match(log, path):
         )
         return None
     fp = fp.decode()
-    _fingerprints[path] = fp
+    _matches[path].fingerprint = fp
     try:
-        res = acoustid.lookup(API_KEY, fp, duration, meta="recordings releases")
+        res = acoustid.lookup(
+            API_KEY, fp, duration, meta="recordings releases sources"
+        )
     except acoustid.AcoustidError as exc:
         log.debug(
             "fingerprint matching {0} failed: {1}",
@@ -112,16 +131,16 @@ def acoustid_match(log, path):
     if result["score"] < SCORE_THRESH:
         log.debug("no results above threshold")
         return None
-    _acoustids[path] = result["id"]
+    _matches[path].acoustid = result["id"]
 
     # Get recording and releases from the result
     if not result.get("recordings"):
         log.debug("no recordings found")
         return None
-    recording_ids = []
+    recordings = []
     releases = []
     for recording in result["recordings"]:
-        recording_ids.append(recording["id"])
+        recordings.append(Recording(recording["id"], recording["sources"]))
         if "releases" in recording:
             releases.extend(recording["releases"])
 
@@ -139,10 +158,9 @@ def acoustid_match(log, path):
     )
     release_ids = [rel["id"] for rel in releases]
 
-    log.debug(
-        "matched recordings {0} on releases {1}", recording_ids, release_ids
-    )
-    _matches[path] = recording_ids, release_ids
+    log.debug("matched recordings {0} on releases {1}", recordings, release_ids)
+    _matches[path].recordings = recordings
+    _matches[path].release_ids = release_ids
 
 
 # Plugin structure and autotagging logic.
@@ -158,7 +176,7 @@ def _all_releases(items):
         if item.path not in _matches:
             continue
 
-        _, release_ids = _matches[item.path]
+        release_ids = _matches[item.path].release_ids
         for release_id in release_ids:
             relcounts[release_id] += 1
 
@@ -168,31 +186,82 @@ def _all_releases(items):
 
 
 class AcoustidPlugin(plugins.BeetsPlugin):
+    apikey: str = None
+
     def __init__(self):
         super().__init__()
 
-        self.config.add(
-            {
-                "auto": True,
-            }
-        )
-        config["acoustid"]["apikey"].redact = True
-
+        self.config.add({"auto": True})
         if self.config["auto"]:
             self.register_listener("import_task_start", self.fingerprint_task)
-        self.register_listener("import_task_apply", apply_acoustid_metadata)
+            self.register_listener(
+                "import_task_before_choice", self.display_acoustid_id
+            )
+            self.register_listener("import_task_apply", apply_acoustid_metadata)
+
+        config["acoustid"].add({"autosubmit": False})
+        config["acoustid"]["apikey"].redact = True
+        if config["acoustid"]["autosubmit"]:
+            try:
+                self.apikey = config["acoustid"]["apikey"].as_str()
+            except confuse.NotFoundError:
+                raise ui.UserError("no Acoustid user API key provided")
+            self.import_stages = [self.submit_if_needed]
+
+    def submit_if_needed(
+        self, session: importer.ImportSession, task: importer.ImportTask
+    ):
+        items: list[library.Item] = task.imported_items()
+        items_to_submit: list[library.Item] = []
+        for item in items:
+            if item.mb_trackid == None:
+                # Probably imported "as-is"
+                continue
+
+            match = _matches[item.path]
+            recording = next(
+                iter([r for r in match.recordings if r.id == item.mb_trackid]),
+                None,
+            )
+            if recording == None:
+                items_to_submit.append(item)
+
+        if len(items_to_submit) > 0:
+            submit_items(self._log, self.apikey, items_to_submit)
 
     def fingerprint_task(self, task, session):
         return fingerprint_task(self._log, task, session)
 
+    def display_acoustid_id(
+        self, task: importer.ImportTask, session: importer.ImportSession
+    ):
+        if type(task) is importer.SingletonImportTask:
+            match = _matches[task.item.path]
+            if match.acoustid:
+                ui.print_(f"Acoustid ID: {match.acoustid}")
+            else:
+                ui.print_(
+                    ui.colorize(
+                        "text_warning",
+                        "Fingerprint is not associated with an acoustid id.",
+                    )
+                )
+
     def track_distance(self, item, info):
         dist = hooks.Distance()
-        if item.path not in _matches or not info.track_id:
-            # Match failed or no track ID.
+        if not info.track_id:
             return dist
 
-        recording_ids, _ = _matches[item.path]
-        dist.add_expr("track_id", info.track_id not in recording_ids)
+        match = _matches[item.path]
+        if not match.acoustid:
+            dist.add_expr("track_id", True)
+        else:
+            recording = next(
+                iter([r for r in match.recordings if r.id == info.track_id]),
+                None,
+            )
+            if not recording:
+                dist.add_expr("track_id", True)
         return dist
 
     def candidates(self, items, artist, album, va_likely, extra_tags=None):
@@ -209,12 +278,19 @@ class AcoustidPlugin(plugins.BeetsPlugin):
         if item.path not in _matches:
             return []
 
-        recording_ids, _ = _matches[item.path]
+        match = _matches[item.path]
         tracks = []
-        for recording_id in prefix(recording_ids, MAX_RECORDINGS):
-            track = hooks.track_for_mbid(recording_id)
+        sorted_recordings = sorted(
+            match.recordings, key=lambda r: r.sources, reverse=True
+        )
+        for recording in prefix(sorted_recordings, MAX_RECORDINGS):
+            track = hooks.track_for_mbid(recording.id)
             if track:
                 tracks.append(track)
+                # We might get a different recording in case the requested
+                # recording was merged into another recording.
+                if track.track_id != recording.id:
+                    recording.id = track.track_id
         self._log.debug("acoustid item candidates: {0}", len(tracks))
         return tracks
 
@@ -248,7 +324,9 @@ class AcoustidPlugin(plugins.BeetsPlugin):
 # Hooks into import process.
 
 
-def fingerprint_task(log, task, session):
+def fingerprint_task(
+    log, task: importer.ImportTask, session: importer.ImportSession
+):
     """Fingerprint each item in the task for later use during the
     autotagging candidate search.
     """
@@ -257,13 +335,18 @@ def fingerprint_task(log, task, session):
         acoustid_match(log, item.path)
 
 
-def apply_acoustid_metadata(task, session):
+def apply_acoustid_metadata(
+    task: importer.ImportTask, session: importer.ImportSession
+):
     """Apply Acoustid metadata (fingerprint and ID) to the task's items."""
     for item in task.imported_items():
-        if item.path in _fingerprints:
-            item.acoustid_fingerprint = _fingerprints[item.path]
-        if item.path in _acoustids:
-            item.acoustid_id = _acoustids[item.path]
+        if not item.path in _matches:
+            continue
+        match = _matches[item.path]
+        if match.fingerprint:
+            item.acoustid_fingerprint = match.fingerprint
+        if match.acoustid:
+            item.acoustid_id = match.acoustid
 
 
 # UI commands.

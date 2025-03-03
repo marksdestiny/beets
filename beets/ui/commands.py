@@ -43,6 +43,7 @@ from beets.util import (
     normpath,
     syspath,
 )
+import beets.util
 
 from . import _store_dict
 
@@ -1732,7 +1733,22 @@ def update_items(lib, query, album, move, pretend, fields, exclude_fields=None):
             if not album:  # Empty albums have already been removed.
                 log.debug("emptied album {0}", album_id)
                 continue
-            first_item = album.items().get()
+            items = album.items()
+            first_item = items[0]
+
+            # Detect if album-level field differ between tracks.
+            diff_fields = []
+            for key in library.Album.item_keys:
+                values = beets.util.unique_list_of_non_hashable(
+                    [item[key] for item in items if item[key] != None]
+                )
+                if len(values) > 1:
+                    diff_fields.append(key)
+
+            if len(diff_fields) > 0:
+                log.warning(
+                    f"Warning: The field(s) {str.join(", ", diff_fields)} differ between tracks of album \"{displayable_path(album.path)}\"."
+                )
 
             # Update album structure to reflect an item in it.
             for key in library.Album.item_keys:

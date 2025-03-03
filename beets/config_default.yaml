@@ -93,6 +93,7 @@ sunique:
 
 # --------------- Tagging ---------------
 
+item_genre: no
 per_disc_numbering: no
 original_date: no
 artist_credit: no
