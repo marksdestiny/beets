@@ -1845,6 +1845,9 @@ def _raw_main(args, lib=None):
     subcommands, plugins, lib = _setup(options, lib)
     parser.add_subcommand(*subcommands)
 
+    if config["item_genre"]:
+        library.Album.item_keys.remove("genre")
+
     subcommand, suboptions, subargs = parser.parse_subcommand(subargs)
     subcommand.func(lib, suboptions, subargs)
 
