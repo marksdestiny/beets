@@ -121,7 +121,8 @@ def acoustid_match(log, path):
             exc,
         )
         return None
-    log.debug("chroma: fingerprinted {0}", util.displayable_path(repr(path)))
+    log.debug(f"chroma: fingerprinted {util.displayable_path(repr(path))}")
+    log.debug(f"chroma: fingerprint {fp}")
 
     # Ensure the response is usable and parse it.
     if res["status"] != "ok" or not res.get("results"):
