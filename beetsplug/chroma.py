@@ -20,6 +20,7 @@ import re
 from collections import defaultdict
 from functools import partial
 
+import time
 import dataclasses
 import acoustid
 import confuse
@@ -112,17 +113,26 @@ def acoustid_match(log, path):
     _matches[path].fingerprint = fp
     log.debug(f"chroma: fingerprinted {util.displayable_path(repr(path))}")
     log.debug(f"chroma: duration {duration} fingerprint {fp}")
-    try:
-        res = acoustid.lookup(
-            API_KEY, fp, duration, meta="recordings releases sources"
-        )
-    except acoustid.AcoustidError as exc:
-        log.debug(
-            "fingerprint matching {0} failed: {1}",
-            util.displayable_path(repr(path)),
-            exc,
-        )
-        return None
+
+    retry_count = 5
+    while retry_count > 0:
+        try:
+            res = acoustid.lookup(
+                API_KEY, fp, duration, meta="recordings releases sources"
+            )
+        except acoustid.AcoustidError as exc:
+            log.debug(
+                "fingerprint matching {0} failed: {1}",
+                util.displayable_path(repr(path)),
+                exc,
+            )
+            return None
+
+        if res["status"] == "ok":
+            break
+
+        retry_count -= 1
+        time.sleep(1)
 
     if res["status"] != "ok":
         try:
@@ -130,13 +140,12 @@ def acoustid_match(log, path):
             message = res["error"]["message"]
             log.warning(
                 "acoustid lookup error: {0} (code {1})",
-                res["error"]["message"],
-                res["error"]["code"],
+                message,
+                code,
             )
         except KeyError:
             log.warning("acoustid lookup error: {0}", res)
             return None
-
     if not res.get("results"):
         log.debug("no match found")
         return None
