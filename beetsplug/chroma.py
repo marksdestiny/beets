@@ -124,8 +124,20 @@ def acoustid_match(log, path):
         )
         return None
 
-    # Ensure the response is usable and parse it.
-    if res["status"] != "ok" or not res.get("results"):
+    if res["status"] != "ok":
+        try:
+            code = res["error"]["code"]
+            message = res["error"]["message"]
+            log.warning(
+                "acoustid lookup error: {0} (code {1})",
+                res["error"]["message"],
+                res["error"]["code"],
+            )
+        except KeyError:
+            log.warning("acoustid lookup error: {0}", res)
+            return None
+
+    if not res.get("results"):
         log.debug("no match found")
         return None
     result = res["results"][0]  # Best match.
