@@ -49,6 +49,10 @@ action = Enum("action", ["SKIP", "ASIS", "TRACKS", "APPLY", "ALBUMS", "RETAG"])
 # new metadata". It's not reachable via the standard command prompt but
 # can be used by plugins.
 
+action_duplicates = Enum(
+    "action_duplicates", ["SKIPNEW", "KEEPALL", "REMOVEOLD", "MERGEALL"]
+)
+
 QUEUE_SIZE = 128
 SINGLE_ARTIST_THRESH = 0.25
 

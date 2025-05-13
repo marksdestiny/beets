@@ -1031,6 +1031,11 @@ def abort_action(session, task):
     raise importer.ImportAbortError()
 
 
+def abort_duplicates_resolution_action(session, task, duplicates):
+    """A prompt choice callback that aborts the importer."""
+    raise importer.ImportAbortError()
+
+
 class TerminalImportSession(importer.ImportSession):
     """An import session that runs in a terminal."""
 
@@ -1180,54 +1185,66 @@ class TerminalImportSession(importer.ImportSession):
         if config["import"]["quiet"]:
             # In quiet mode, don't prompt -- just skip.
             log.info("Skipping.")
-            sel = "s"
+            action = importer.action_duplicates.SKIPNEW
         else:
-            # Print some detail about the existing and new items so the
-            # user can make an informed decision.
-            for duplicate in found_duplicates:
+            while True:
+                # Print some detail about the existing and new items so the
+                # user can make an informed decision.
+                for duplicate in found_duplicates:
+                    print_(
+                        "Old: "
+                        + summarize_items(
+                            (
+                                list(duplicate.items())
+                                if task.is_album
+                                else [duplicate]
+                            ),
+                            not task.is_album,
+                        )
+                    )
+                    if config["import"]["duplicate_verbose_prompt"]:
+                        if task.is_album:
+                            for dup in duplicate.items():
+                                print(f"  {dup}")
+                        else:
+                            print(f"  {duplicate}")
+
                 print_(
-                    "Old: "
+                    "New: "
                     + summarize_items(
-                        (
-                            list(duplicate.items())
-                            if task.is_album
-                            else [duplicate]
-                        ),
+                        task.imported_items(),
                         not task.is_album,
                     )
                 )
                 if config["import"]["duplicate_verbose_prompt"]:
-                    if task.is_album:
-                        for dup in duplicate.items():
-                            print(f"  {dup}")
-                    else:
-                        print(f"  {duplicate}")
+                    for item in task.imported_items():
+                        print(f"  {item}")
 
-            print_(
-                "New: "
-                + summarize_items(
-                    task.imported_items(),
-                    not task.is_album,
-                )
-            )
-            if config["import"]["duplicate_verbose_prompt"]:
-                for item in task.imported_items():
-                    print(f"  {item}")
+                choices = self._get_duplicate_resolution_choices(task)
 
-            sel = ui.input_options(
-                ("Skip new", "Keep all", "Remove old", "Merge all")
-            )
+                # Build helper variables for the prompt choices.
+                choice_opts = tuple(c.long for c in choices)
+                choice_actions = {c.short: c for c in choices}
 
-        if sel == "s":
+                sel = ui.input_options(choice_opts)
+                choice = choice_actions[sel]
+
+                if choice in choices:
+                    post_choice = choice.callback(self, task, found_duplicates)
+                    if isinstance(post_choice, importer.action_duplicates):
+                        action = post_choice
+                        break
+
+        if action == importer.action_duplicates.SKIPNEW:
             # Skip new.
             task.set_choice(importer.action.SKIP)
-        elif sel == "k":
+        elif action == importer.action_duplicates.KEEPALL:
             # Keep both. Do nothing; leave the choice intact.
             pass
-        elif sel == "r":
+        elif action == importer.action_duplicates.REMOVEOLD:
             # Remove old.
             task.should_remove_duplicates = True
-        elif sel == "m":
+        elif action == importer.action_duplicates.MERGEALL:
             task.should_merge_duplicates = True
         else:
             assert False
@@ -1292,6 +1309,85 @@ class TerminalImportSession(importer.ImportSession):
             + choices
             + extra_choices
         )
+
+        # Check for conflicts.
+        short_letters = [c.short for c in all_choices]
+        if len(short_letters) != len(set(short_letters)):
+            # Duplicate short letter has been found.
+            duplicates = [
+                i for i, count in Counter(short_letters).items() if count > 1
+            ]
+            for short in duplicates:
+                # Keep the first of the choices, removing the rest.
+                dup_choices = [c for c in all_choices if c.short == short]
+                for c in dup_choices[1:]:
+                    log.warning(
+                        "Prompt choice '{0}' removed due to conflict "
+                        "with '{1}' (short letter: '{2}')",
+                        c.long,
+                        dup_choices[0].long,
+                        c.short,
+                    )
+                    extra_choices.remove(c)
+
+        return choices + extra_choices
+
+    def _get_duplicate_resolution_choices(self, task):
+        """Get the list of prompt choices that should be presented to the
+        user during the import of a duplicate. This consists of both built-in
+        choices and ones provided by plugins.
+
+        The `before_choose_duplicate_resolution` event is sent to the plugins, with
+        session and task as its parameters. Plugins are responsible for
+        checking the right conditions and returning a list of `PromptChoice`s,
+        which is flattened and checked for conflicts.
+
+        If two or more choices have the same short letter, a warning is
+        emitted and all but one choices are discarded, giving preference
+        to the default importer choices.
+
+        Returns a list of `PromptChoice`s.
+        """
+
+        # Standard, built-in choices.
+        choices = [
+            PromptChoice(
+                "s",
+                "Skip new",
+                lambda s, t, d: importer.action_duplicates.SKIPNEW,
+            ),
+            PromptChoice(
+                "k",
+                "Keep all",
+                lambda s, t, d: importer.action_duplicates.KEEPALL,
+            ),
+            PromptChoice(
+                "r",
+                "Remove old",
+                lambda s, t, d: importer.action_duplicates.REMOVEOLD,
+            ),
+            PromptChoice(
+                "m",
+                "Merge all",
+                lambda s, t, d: importer.action_duplicates.MERGEALL,
+            ),
+        ]
+        choices += [
+            PromptChoice("b", "aBort", abort_duplicates_resolution_action),
+        ]
+
+        # Send the before_choose_candidate event and flatten list.
+        extra_choices = list(
+            chain(
+                *plugins.send(
+                    "before_choose_duplicate_resolution",
+                    session=self,
+                    task=task,
+                )
+            )
+        )
+
+        all_choices = choices + extra_choices
 
         # Check for conflicts.
         short_letters = [c.short for c in all_choices]
